@@ -51,7 +51,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
+.topbar { display: flex; align-items: center; justify-content: space-between; }
 .topbar h1 { margin: 0; font-size: 24px; font-weight: 800; }
+.sync-badge { font-size: 18px; }
+.sync-badge[hidden] { display: none; }
 
 main {
   padding: 4px 16px calc(84px + var(--safe-b));

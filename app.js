@@ -44,6 +44,52 @@ function save() {
   try { localStorage.setItem(KEY, JSON.stringify(S)); }
   catch (e) { alert('저장에 실패했어요: ' + e.message); }
 }
+// 기록을 바꾼 뒤 호출: 이 기기에 저장 + (로그인 중이면) 클라우드에 전송
+function commit(ops) {
+  save();
+  if (!ops || !ops.length) return;
+  if (window.CarSync) window.CarSync.apply(ops);
+  else (window.__carOps = window.__carOps || []).push(...ops);
+}
+// 새 기록 추가 또는 기존 기록 수정
+function upsert(kind, rec, v) {
+  let cur = rec && S[kind].find(r => r.id === rec.id);
+  if (cur) Object.assign(cur, v);
+  else { cur = { id: uid(), ...v }; S[kind].push(cur); }
+  return [{ t: 'put', kind, rec: cur }];
+}
+function remove(kind, rec) {
+  S[kind] = S[kind].filter(r => r.id !== rec.id);
+  return [{ t: 'del', kind, id: rec.id }];
+}
+// sync.js 와 주고받는 연결부
+let remoteDirty = false;
+window.CarApp = {
+  getState: () => S,
+  setRemote(data) {
+    S = normalize(data); save();
+    if (sheetCtx) remoteDirty = true; else render();
+  },
+  onSync() {
+    updateSyncBadge();
+    if (tab === 'settings' && !sheetCtx) render();
+  },
+};
+const SYNC_LABEL = {
+  connecting: '🔄 연결 중',
+  synced: '✅ 동기화됨',
+  saving: '⏳ 저장 중',
+  offline: '📴 오프라인 · 연결되면 자동 저장',
+  error: '⚠️ 동기화 오류',
+};
+function updateSyncBadge() {
+  const b = document.getElementById('syncBadge'); if (!b) return;
+  const c = window.CarSync;
+  if (!c || !c.user) { b.hidden = true; return; }
+  b.hidden = false;
+  b.textContent = { synced: '☁️', saving: '⏳', offline: '📴', error: '⚠️', connecting: '🔄' }[c.status] || '☁️';
+  b.title = SYNC_LABEL[c.status] || '';
+}
 // 홈 화면 앱의 데이터를 오래 보관하도록 요청
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
@@ -374,9 +420,12 @@ const VIEWS = {
           <div class="r muted">${[num(iv.km) ? km(iv.km) : '', num(iv.months) ? iv.months + '개월' : ''].filter(Boolean).join(' / ') || '주기 없음'} ›</div>
         </button>`).join('')}</div>
 
+      <div class="section-title">클라우드 동기화</div>
+      ${syncCardHtml()}
+
       <div class="section-title">백업</div>
       <div class="card">
-        <p class="muted" style="margin-top:0">기록은 이 아이폰 안에만 저장돼요. 휴대폰을 바꾸거나 앱을 지우기 전에 꼭 백업 파일을 저장해 두세요. (파일 앱 · iCloud Drive에 저장 가능)</p>
+        <p class="muted" style="margin-top:0">${window.CarSync && window.CarSync.user ? '기록은 클라우드에 저장되고 있어요. 그래도 가끔 백업 파일을 저장해 두면 더 안전해요.' : '로그인하지 않으면 기록은 이 기기 안에만 저장돼요. 휴대폰을 바꾸거나 앱을 지우기 전에 꼭 백업 파일을 저장해 두세요.'} (파일 앱 · iCloud Drive에 저장 가능)</p>
         <button class="btn" data-act="export">백업 파일 저장</button>
         <button class="btn secondary" data-act="import">백업 파일 불러오기</button>
         <input type="file" id="importFile" accept="application/json,.json" hidden>
@@ -384,15 +433,15 @@ const VIEWS = {
       <div class="card">
         <button class="btn danger" data-act="reset">모든 기록 지우기</button>
       </div>
-      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.0</p>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.1</p>
     `;
   },
 };
 
 /* ================= 입력 시트 ================= */
 let sheetCtx = null;
-function openSheet({ title, fields, values = {}, onSave, onDelete, saveLabel = '저장' }) {
-  sheetCtx = { fields, onSave, onDelete };
+function openSheet({ title, fields, values = {}, onSave, onDelete, saveLabel = '저장', doneMsg = '저장했어요', extraHtml = '' }) {
+  sheetCtx = { fields, onSave, onDelete, doneMsg };
   const f = fields.map(fd => {
     if (fd.row) return `<div class="field-row">${fd.row.map(x => fieldHtml(x, values)).join('')}</div>`;
     return fieldHtml(fd, values);
@@ -402,6 +451,7 @@ function openSheet({ title, fields, values = {}, onSave, onDelete, saveLabel = '
     <form id="sheetForm" autocomplete="off">${f}
       <button class="btn" type="submit">${saveLabel}</button>
       ${onDelete ? '<button class="btn danger" type="button" data-sheet="delete">삭제</button>' : ''}
+      ${extraHtml}
     </form>`;
   $('#backdrop').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -417,10 +467,13 @@ function fieldHtml(fd, values) {
   else if (fd.type === 'textarea') input = `<textarea id="${id}" name="${fd.name}" placeholder="${esc(fd.ph || '')}">${esc(v)}</textarea>`;
   else if (fd.type === 'num') input = `<input id="${id}" name="${fd.name}" type="text" inputmode="${fd.decimal ? 'decimal' : 'numeric'}" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}>`;
   else if (fd.type === 'list') input = `<input id="${id}" name="${fd.name}" list="${id}_dl" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}><datalist id="${id}_dl">${fd.options.map(o => `<option value="${esc(o)}">`).join('')}</datalist>`;
-  else input = `<input id="${id}" name="${fd.name}" type="${fd.type || 'text'}" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}>`;
+  else input = `<input id="${id}" name="${fd.name}" type="${fd.type || 'text'}" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${fd.ac ? `autocomplete="${fd.ac}" autocapitalize="none"` : ''} ${req}>`;
   return `<div class="field"><label for="${id}">${esc(fd.label)}</label>${input}${hint}</div>`;
 }
-function closeSheet() { $('#backdrop').hidden = true; $('#sheet').innerHTML = ''; sheetCtx = null; document.body.style.overflow = ''; }
+function closeSheet() {
+  $('#backdrop').hidden = true; $('#sheet').innerHTML = ''; sheetCtx = null; document.body.style.overflow = '';
+  if (remoteDirty) { remoteDirty = false; render(); }
+}
 function readForm() {
   const form = $('#sheetForm'); const out = {};
   const all = sheetCtx.fields.flatMap(f => f.row || [f]);
@@ -433,13 +486,25 @@ function readForm() {
   }
   return out;
 }
-function submitSheet() {
+// onSave 는 오류 문구(문자열) 또는 변경 목록(배열)을 돌려줘요. 로그인처럼 기다려야 하면 Promise.
+let sheetBusy = false;
+async function submitSheet() {
+  if (sheetBusy || !sheetCtx) return;
   const form = $('#sheetForm');
   if (!form.reportValidity()) return;
-  const v = readForm();
-  const err = sheetCtx.onSave(v);
-  if (err) { alert(err); return; }
-  save(); closeSheet(); render(); toast('저장했어요');
+  const ctx = sheetCtx;
+  let r = ctx.onSave(readForm());
+  if (r && typeof r.then === 'function') {
+    sheetBusy = true;
+    $('#sheet').querySelectorAll('button').forEach(b => (b.disabled = true));
+    try { r = await r; } finally {
+      sheetBusy = false;
+      $('#sheet').querySelectorAll('button').forEach(b => (b.disabled = false));
+    }
+    if (sheetCtx !== ctx) return;
+  }
+  if (typeof r === 'string') { alert(r); return; }
+  commit(r); closeSheet(); render(); toast(ctx.doneMsg);
 }
 
 /* --- 각 기록 폼 --- */
@@ -462,9 +527,9 @@ function fuelForm(rec) {
     onSave(v) {
       if (v.odo <= 0) return '주행거리를 입력해 주세요';
       if (v.liters <= 0) return '주유량을 입력해 주세요';
-      if (isNew) S.fuel.push({ id: uid(), ...v }); else Object.assign(rec, v);
+      return upsert('fuel', rec, v);
     },
-    onDelete: isNew ? null : () => { S.fuel = S.fuel.filter(r => r !== rec); },
+    onDelete: isNew ? null : () => remove('fuel', rec),
   });
 }
 function maintForm(rec, presetItem) {
@@ -483,10 +548,8 @@ function maintForm(rec, presetItem) {
       { name: 'shop', label: '정비소 (선택)' },
       { name: 'memo', label: '메모 (선택)', type: 'textarea', ph: '부품명, 다음 점검 내용 등' },
     ],
-    onSave(v) {
-      if (isNew) S.maint.push({ id: uid(), ...v }); else Object.assign(rec, v);
-    },
-    onDelete: isNew ? null : () => { S.maint = S.maint.filter(r => r !== rec); },
+    onSave(v) { return upsert('maint', rec, v); },
+    onDelete: isNew ? null : () => remove('maint', rec),
   });
 }
 function insForm(rec) {
@@ -507,9 +570,9 @@ function insForm(rec) {
     ],
     onSave(v) {
       if (v.end < v.start) return '만기일이 시작일보다 빨라요';
-      if (isNew) S.insurance.push({ id: uid(), ...v }); else Object.assign(rec, v);
+      return upsert('insurance', rec, v);
     },
-    onDelete: isNew ? null : () => { S.insurance = S.insurance.filter(r => r !== rec); },
+    onDelete: isNew ? null : () => remove('insurance', rec),
   });
 }
 function taxForm(rec) {
@@ -528,10 +591,8 @@ function taxForm(rec) {
       { name: 'amount', label: '납부 금액 (원)', type: 'num', required: true },
       { name: 'memo', label: '메모 (선택)', ph: '예: 연납 할인 적용' },
     ],
-    onSave(v) {
-      if (isNew) S.tax.push({ id: uid(), ...v }); else Object.assign(rec, v);
-    },
-    onDelete: isNew ? null : () => { S.tax = S.tax.filter(r => r !== rec); },
+    onSave(v) { return upsert('tax', rec, v); },
+    onDelete: isNew ? null : () => remove('tax', rec),
   });
 }
 function carForm() {
@@ -547,7 +608,7 @@ function carForm() {
       { name: 'fuelType', label: '연료', type: 'select', options: ['휘발유', '경유', 'LPG', '하이브리드', '전기'] },
       { name: 'odo', label: '현재 주행거리 (km)', type: 'num', hint: '주유·정비 기록 중 가장 큰 주행거리가 자동으로 반영돼요' },
     ],
-    onSave(v) { Object.assign(S.car, v); },
+    onSave(v) { Object.assign(S.car, v); return [{ t: 'car' }]; },
   });
 }
 function intervalForm(idx) {
@@ -565,15 +626,52 @@ function intervalForm(idx) {
     ],
     onSave(v) {
       v.km = num(v.km); v.months = num(v.months);
+      const ops = [{ t: 'intervals' }];
       if (isNew) S.intervals.push(v);
       else {
+        const cur = S.intervals.find(x => x.item === iv.item) || iv;
         // 이름을 바꾸면 기존 정비 기록의 항목 이름도 같이 변경
-        if (iv.item !== v.item) S.maint.forEach(r => { if (r.item === iv.item) r.item = v.item; });
-        Object.assign(iv, v);
+        if (cur.item !== v.item) S.maint.forEach(r => { if (r.item === cur.item) { r.item = v.item; ops.push({ t: 'put', kind: 'maint', rec: r }); } });
+        Object.assign(cur, v);
       }
+      return ops;
     },
-    onDelete: isNew ? null : () => { S.intervals.splice(idx, 1); },
+    onDelete: isNew ? null : () => { S.intervals = S.intervals.filter(x => x.item !== iv.item); return [{ t: 'intervals' }]; },
   });
+}
+
+function loginForm() {
+  openSheet({
+    title: '로그인',
+    saveLabel: '로그인',
+    doneMsg: '로그인했어요',
+    fields: [
+      { name: 'email', label: '이메일', type: 'email', ac: 'username', required: true },
+      { name: 'password', label: '비밀번호', type: 'password', ac: 'current-password', required: true },
+    ],
+    extraHtml: '<button class="btn secondary" type="button" data-sheet="reset-pw">비밀번호를 잊었어요</button>',
+    onSave(v) { return window.CarSync.login(v.email, v.password).then(err => err || []); },
+  });
+}
+
+function syncCardHtml() {
+  const c = window.CarSync;
+  if (!c || !c.ready) {
+    return `<div class="card"><div class="muted">클라우드 상태를 확인하는 중…</div></div>`;
+  }
+  if (!c.configured) {
+    return `<div class="card"><div class="muted">클라우드 동기화가 아직 설정되지 않았어요. <b>firebase-config.js</b>에 Firebase 설정값을 넣으면 PC와 아이폰 기록을 자동으로 맞출 수 있어요.</div></div>`;
+  }
+  if (!c.user) {
+    return `<div class="card">
+      <p class="muted" style="margin-top:0">로그인하면 PC와 아이폰의 기록이 자동으로 같아져요. 이 기기에 있던 기록은 클라우드에 합쳐져요.</p>
+      ${c.status === 'error' ? '<p class="muted">⚠️ 클라우드에 연결하지 못했어요. 인터넷 연결을 확인한 뒤 앱을 다시 열어 주세요.</p>' : ''}
+      <button class="btn" data-act="login">로그인</button></div>`;
+  }
+  return `<div class="card">
+    <div class="kv"><span>계정</span><span>${esc(c.user.email)}</span></div>
+    <div class="kv"><span>상태</span><span>${SYNC_LABEL[c.status] || ''}</span></div>
+    <button class="btn secondary" style="margin-top:12px" data-act="logout">로그아웃</button></div>`;
 }
 
 /* ================= 백업 ================= */
@@ -599,7 +697,7 @@ function importData(file) {
       const d = JSON.parse(r.result);
       if (!d || typeof d !== 'object' || !('car' in d)) throw new Error('형식 오류');
       if (!confirm('지금 기록을 백업 파일 내용으로 바꿀까요? 현재 기록은 사라져요.')) return;
-      S = normalize(d); save(); render(); toast('불러왔어요');
+      S = normalize(d); commit([{ t: 'all' }]); render(); toast('불러왔어요');
     } catch (e) { alert('백업 파일을 읽을 수 없어요.'); }
   };
   r.readAsText(file);
@@ -631,9 +729,13 @@ $('#main').addEventListener('click', e => {
     case 'export': return exportData();
     case 'import': { const f = $('#importFile'); f.value = ''; f.onchange = () => f.files[0] && importData(f.files[0]); f.click(); return; }
     case 'reset':
-      if (confirm('정말 모든 기록을 지울까요? 되돌릴 수 없어요.') && confirm('한 번 더 확인할게요. 백업은 해두셨나요? 모두 지웁니다.')) {
-        S = defaults(); save(); render(); toast('모두 지웠어요');
+      if (confirm('정말 모든 기록을 지울까요? 되돌릴 수 없어요.' + (window.CarSync && window.CarSync.user ? '\n로그인 중이라 클라우드 기록과 다른 기기의 기록도 같이 지워져요.' : '')) && confirm('한 번 더 확인할게요. 백업은 해두셨나요? 모두 지웁니다.')) {
+        S = defaults(); commit([{ t: 'all' }]); render(); toast('모두 지웠어요');
       }
+      return;
+    case 'login': return loginForm();
+    case 'logout':
+      if (confirm('로그아웃할까요? 이 기기에 있는 기록은 그대로 남지만, 다른 기기와 동기화는 멈춰요.')) window.CarSync.logout();
       return;
   }
 });
@@ -643,7 +745,12 @@ $('#backdrop').addEventListener('click', e => {
   if (b.dataset.sheet === 'close') closeSheet();
   else if (b.dataset.sheet === 'save') submitSheet();
   else if (b.dataset.sheet === 'delete') {
-    if (confirm('이 기록을 삭제할까요?')) { sheetCtx.onDelete(); save(); closeSheet(); render(); toast('삭제했어요'); }
+    if (confirm('이 기록을 삭제할까요?')) { commit(sheetCtx.onDelete()); closeSheet(); render(); toast('삭제했어요'); }
+  }
+  else if (b.dataset.sheet === 'reset-pw') {
+    const email = ($('#f_email') || {}).value || '';
+    if (!email.trim()) { alert('위 칸에 이메일을 먼저 입력해 주세요.'); return; }
+    window.CarSync.resetPassword(email.trim()).then(err => alert(err || '비밀번호 재설정 메일을 보냈어요. 메일함(스팸함 포함)을 확인해 주세요.'));
   }
 });
 $('#backdrop').addEventListener('submit', e => { e.preventDefault(); submitSheet(); });
