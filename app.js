@@ -53,6 +53,7 @@ function commit(ops) {
 }
 // 새 기록 추가 또는 기존 기록 수정
 function upsert(kind, rec, v) {
+  v = { ...v, updatedAt: Date.now() }; // 기기끼리 합칠 때 더 최근 것을 고르기 위한 시각
   let cur = rec && S[kind].find(r => r.id === rec.id);
   if (cur) Object.assign(cur, v);
   else { cur = { id: uid(), ...v }; S[kind].push(cur); }
@@ -66,6 +67,7 @@ function remove(kind, rec) {
 let remoteDirty = false;
 window.CarApp = {
   getState: () => S,
+  defaultIntervals: DEFAULT_INTERVALS,
   setRemote(data) {
     S = normalize(data); save();
     if (sheetCtx) remoteDirty = true; else render();
@@ -460,7 +462,7 @@ const VIEWS = {
       <div class="card">
         <button class="btn danger" data-act="reset">모든 기록 지우기</button>
       </div>
-      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.5</p>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.6</p>
     `;
   },
 };

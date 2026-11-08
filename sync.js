@@ -67,6 +67,7 @@ async function onUser(user) {
   if (unsub) { unsub(); unsub = null; }
   ref = null;
   if (!user) {
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
     api.user = null; api.status = 'off'; api.ready = true; pending = [];
     notify();
     return;
@@ -75,39 +76,93 @@ async function onUser(user) {
   ref = fsM.doc(db, 'users', user.uid);
   api.user = { email: user.email, uid: user.uid };
   api.status = 'connecting';
-  try { await firstMerge(user.uid); } catch (e) { console.warn('첫 병합은 다음에 다시 시도해요', e); }
+  // 합치기가 끝나기 전에는 클라우드 값으로 이 기기 기록을 덮어쓰지 않아요
+  let merged = await mergeOnLogin(user.uid);
+  let lastSnap = null;
   api.ready = true;
   const ops = pending.splice(0);
   if (ops.length) apply(ops);
   notify();
   unsub = fsM.onSnapshot(ref, { includeMetadataChanges: true }, snap => {
+    lastSnap = snap;
     api.status = snap.metadata.hasPendingWrites ? 'saving' : snap.metadata.fromCache ? 'offline' : 'synced';
-    if (snap.exists()) window.CarApp.setRemote(fromRemote(snap.data()));
+    if (merged === true) {
+      if (snap.exists()) window.CarApp.setRemote(fromRemote(snap.data()));
+    } else if (merged === false && !snap.metadata.fromCache) {
+      // 인터넷이 연결됐으니 이제 합치기
+      merged = 'running';
+      mergeOnLogin(user.uid).then(ok => {
+        merged = ok;
+        if (ok && lastSnap && lastSnap.exists()) window.CarApp.setRemote(fromRemote(lastSnap.data()));
+      });
+    }
     notify();
   }, err => { console.error(err); api.status = 'error'; notify(); });
 }
 
-// 이 기기에서 처음 로그인할 때: 이 기기에만 있던 기록을 클라우드에 합쳐요 (지우지 않고 더하기만)
-async function firstMerge(uid) {
-  const key = 'carlog-merged-' + uid;
-  try { if (localStorage.getItem(key)) return; } catch (e) { return; }
+// 로그인할 때(로그아웃 상태 → 로그인): 이 기기의 기록을 클라우드와 합쳐요.
+// 원칙: 아무것도 지우지 않고, 빈칸은 채우고, 같은 기록이면 더 최근에 고친 쪽을 남겨요.
+const SESSION_KEY = 'carlog-session-uid';
+const isEmpty = v => v === '' || v === null || v === undefined || v === false || v === 0;
+
+function mergePatch(local, r) {
+  const patch = {};
+  // 1) 주유·정비·보험·세금 기록: 클라우드에 없거나, 이 기기 쪽이 더 최근에 고친 기록이면 올림
+  for (const k of KINDS) {
+    const have = (r && r[k]) || {};
+    for (const rec of local[k]) {
+      const rem = have[rec.id];
+      if (!rem || (rec.updatedAt || 0) > (rem.updatedAt || 0)) (patch[k] = patch[k] || {})[rec.id] = clean(rec);
+    }
+  }
+  // 2) 차량 정보: 클라우드에서 비어 있는 칸만 이 기기 값으로 채움
+  const rc = (r && r.car) || {};
+  const car = {};
+  for (const [f, v] of Object.entries(local.car || {})) if (!isEmpty(v) && isEmpty(rc[f])) car[f] = v;
+  if (Object.keys(car).length) patch.car = car;
+  // 3) 소모품 항목: 클라우드에 없는 항목은 추가, 있는 항목은 빈칸만 채움
+  const remoteIv = Array.isArray(r && r.intervals) ? clean(r.intervals) : null;
+  if (!remoteIv) patch.intervals = clean(local.intervals);
+  else {
+    let changed = false;
+    for (const li of local.intervals) {
+      const ri = remoteIv.find(x => x.item === li.item);
+      if (!ri) { remoteIv.push(clean(li)); changed = true; continue; }
+      // 클라우드 값이 비어 있거나 처음 기본값 그대로면 이 기기에서 바꾼 값을 씀
+      const def = ((window.CarApp && window.CarApp.defaultIntervals) || []).find(d => d.item === li.item);
+      for (const [f, v] of Object.entries(li)) {
+        if (f === 'lastUnknown' || isEmpty(v) || v === ri[f]) continue;
+        if (isEmpty(ri[f]) || (def && f in def && ri[f] === def[f])) { ri[f] = v; changed = true; }
+      }
+      if (li.lastUnknown && !ri.lastDate && !ri.lastUnknown) { ri.lastUnknown = true; changed = true; }
+    }
+    if (changed) patch.intervals = remoteIv;
+  }
+  return patch;
+}
+
+async function mergeOnLogin(uid) {
+  let prev = null;
+  try { prev = localStorage.getItem(SESSION_KEY); } catch (e) {}
+  if (prev === uid) return true; // 계속 로그인 상태였던 기기: 이미 클라우드와 같음
   const { fsM } = fb;
-  const snap = await fsM.getDoc(ref);
   const local = window.CarApp.getState();
   const fail = e => { console.error(e); api.status = 'error'; notify(); };
-  if (!snap.exists()) {
-    fsM.setDoc(ref, toRemote(local)).catch(fail);
-  } else {
-    const r = snap.data();
-    const patch = {};
-    for (const k of KINDS) {
-      const have = r[k] || {};
-      for (const rec of local[k]) if (!have[rec.id]) (patch[k] = patch[k] || {})[rec.id] = clean(rec);
-    }
-    if (!(r.car && r.car.name) && local.car.name) patch.car = clean(local.car);
+  let remote = null, known = false;
+  try { const snap = await fsM.getDoc(ref); known = true; remote = snap.exists() ? snap.data() : null; }
+  catch (e) { console.warn('클라우드를 읽지 못해서 이 기기 기록을 그대로 올려요', e); }
+  if (known) {
+    const patch = mergePatch(local, remote);
     if (Object.keys(patch).length) fsM.setDoc(ref, patch, { merge: true }).catch(fail);
+  } else {
+    // 오프라인: 클라우드 내용을 모르니 기록만 안전하게 올리고(지우지 않음), 다음에 다시 합침
+    const patch = {};
+    for (const k of KINDS) for (const rec of local[k]) (patch[k] = patch[k] || {})[rec.id] = clean(rec);
+    if (Object.keys(patch).length) fsM.setDoc(ref, patch, { merge: true }).catch(fail);
+    return false;
   }
-  localStorage.setItem(key, '1');
+  try { localStorage.setItem(SESSION_KEY, uid); } catch (e) {}
+  return true;
 }
 
 // 앱에서 기록이 바뀔 때마다 호출돼요
