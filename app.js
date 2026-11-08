@@ -124,10 +124,12 @@ function currentOdo() {
 
 // 가득 주유 사이 구간으로 연비 계산
 function fuelStats() {
-  const list = S.fuel.filter(r => num(r.odo) > 0).slice().sort((a, b) => num(a.odo) - num(b.odo) || a.date.localeCompare(b.date));
+  const list = S.fuel.slice().sort((a, b) => (a.date || '').localeCompare(b.date || '') || num(a.odo) - num(b.odo));
   const effById = {};
   let lastFull = null, liters = 0, totKm = 0, totL = 0;
   for (const r of list) {
+    // 주행거리나 주유량을 모르는 기록이 끼면 그 구간은 연비를 계산할 수 없어서 새로 시작
+    if (!(num(r.odo) > 0) || !(num(r.liters) > 0)) { lastFull = null; liters = 0; continue; }
     if (lastFull) liters += num(r.liters);
     if (r.full) {
       if (lastFull && liters > 0 && num(r.odo) > num(lastFull.odo)) {
@@ -328,14 +330,20 @@ const VIEWS = {
       <div class="section-title">주유 내역 <button class="add-btn" data-act="add-fuel">+ 주유 추가</button></div>
       ${list.length ? `<div class="list">${list.map(r => {
         const eff = fs.effById[r.id];
-        const unit = num(r.liters) > 0 ? num(r.amount) / num(r.liters) : 0;
+        const unit = num(r.unitPrice) || (num(r.liters) > 0 ? num(r.amount) / num(r.liters) : 0);
+        const info = [
+          num(r.odo) > 0 ? km(num(r.odo)) : '',
+          num(r.liters) > 0 ? num(r.liters).toFixed(2) + 'L' : '',
+          unit ? Math.round(unit).toLocaleString() + '원/L' : '',
+          r.station ? esc(r.station) : '',
+        ].filter(Boolean).join(' · ');
         return `<button class="row" data-act="edit-fuel" data-id="${r.id}">
           <div class="main"><div class="t">${fmtDate(r.date)} ${r.full ? '' : '<span class="badge gray">부분</span>'}</div>
-          <div class="s">${km(num(r.odo))} · ${num(r.liters).toFixed(2)}L${unit ? ' · ' + Math.round(unit).toLocaleString() + '원/L' : ''}${r.station ? ' · ' + esc(r.station) : ''}</div></div>
+          <div class="s">${info || '&nbsp;'}</div></div>
           <div class="r"><div class="t">${won(num(r.amount))}</div><div class="s">${eff ? eff.toFixed(1) + ' km/L' : ''}</div></div>
         </button>`;
       }).join('')}</div>` : `<div class="card empty">아직 주유 기록이 없어요.<br>가득 주유를 두 번 이상 기록하면 연비가 계산돼요.</div>`}
-      <p class="muted">연비는 '가득 주유'와 다음 '가득 주유' 사이에 넣은 기름 양으로 계산해요.</p>
+      <p class="muted">연비는 '가득 주유'와 다음 '가득 주유' 사이에 넣은 기름 양으로 계산해요. 주행거리나 리터당 가격을 비워둔 기록이 끼어 있으면 그 구간은 연비를 계산하지 않아요.</p>
     `;
   },
 
@@ -344,7 +352,7 @@ const VIEWS = {
     const list = S.maint.slice().sort(byDateDesc);
     const yAmt = S.maint.filter(r => (r.date || '').startsWith(String(new Date().getFullYear()))).reduce((a, r) => a + num(r.cost), 0);
     return `
-      <div class="section-title">소모품 교체 주기 <span class="muted">올해 정비비 ${won(yAmt)}</span></div>
+      <div class="section-title">소모품 교체 주기 <button class="add-btn" data-act="add-interval">+ 항목 추가</button></div>
       <div class="list">${st.map((m, i) => {
         let sub = '마지막 교체: 미입력 · 눌러서 입력해 주세요';
         let next = '';
@@ -373,7 +381,7 @@ const VIEWS = {
       }).join('')}</div>
       <p class="muted" style="margin-top:-4px">항목을 누르면 교체 주기와 마지막 교체 시기를 입력하거나, 교체 기록을 바로 남길 수 있어요.</p>
 
-      <div class="section-title">정비 내역 <button class="add-btn" data-act="add-maint">+ 정비 추가</button></div>
+      <div class="section-title"><span>정비 내역 <span style="font-weight:400">· 올해 ${won(yAmt)}</span></span> <button class="add-btn" data-act="add-maint">+ 정비 추가</button></div>
       ${list.length ? `<div class="list">${list.map(r => `
         <button class="row" data-act="edit-maint" data-id="${r.id}">
           <div class="main"><div class="t">${esc(r.item)}</div>
@@ -452,7 +460,7 @@ const VIEWS = {
       <div class="card">
         <button class="btn danger" data-act="reset">모든 기록 지우기</button>
       </div>
-      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.3</p>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.5</p>
     `;
   },
 };
@@ -529,23 +537,27 @@ async function submitSheet() {
 /* --- 각 기록 폼 --- */
 function fuelForm(rec) {
   const isNew = !rec;
+  // 예전 기록(주유량만 있는 기록)은 리터당 가격을 계산해서 보여줌
+  const prefillPrice = rec ? (rec.unitPrice || (num(rec.liters) > 0 ? Math.round(num(rec.amount) / num(rec.liters)) : '')) : '';
   openSheet({
     title: isNew ? '주유 기록' : '주유 수정',
-    values: rec || { date: today(), full: true, odo: '' },
+    values: rec ? { ...rec, unitPrice: prefillPrice } : { date: today(), full: true, odo: '' },
     fields: [
       { name: 'date', label: '날짜', type: 'date', required: true },
-      { name: 'odo', label: '주행거리 (km)', type: 'num', required: true, ph: `현재 ${Math.round(currentOdo()).toLocaleString()}`, hint: '계기판의 누적 주행거리(ODO)를 입력하세요' },
       { row: [
         { name: 'amount', label: '금액 (원)', type: 'num', required: true, ph: '50000' },
-        { name: 'liters', label: '주유량 (L)', type: 'num', decimal: true, required: true, ph: '30.5' },
+        { name: 'unitPrice', label: '리터당 가격 (원, 선택)', type: 'num', ph: '1650' },
       ] },
+      { name: 'odo', label: '주행거리 (km, 선택)', type: 'num', ph: `현재 ${Math.round(currentOdo()).toLocaleString()}`, hint: '계기판의 누적 주행거리(ODO)예요. 주행거리와 리터당 가격을 넣고 가득 주유하면 연비가 계산돼요' },
       { name: 'full', label: '가득 주유 (연비 계산에 사용)', type: 'check' },
       { name: 'station', label: '주유소 (선택)', ph: 'OO주유소' },
       { name: 'memo', label: '메모 (선택)', type: 'textarea' },
     ],
     onSave(v) {
-      if (v.odo <= 0) return '주행거리를 입력해 주세요';
-      if (v.liters <= 0) return '주유량을 입력해 주세요';
+      if (!(v.amount > 0)) return '금액을 입력해 주세요';
+      // 주유량 = 금액 ÷ 리터당 가격 (예전 기록을 그대로 저장하면 원래 주유량 유지)
+      const unchanged = rec && !rec.unitPrice && v.unitPrice === prefillPrice && v.amount === num(rec.amount);
+      v.liters = unchanged ? rec.liters : v.unitPrice > 0 ? Math.round(v.amount / v.unitPrice * 100) / 100 : '';
       return upsert('fuel', rec, v);
     },
     onDelete: isNew ? null : () => remove('fuel', rec),
@@ -655,6 +667,7 @@ function intervalForm(idx) {
       v.km = num(v.km); v.months = num(v.months);
       if (v.lastUnknown) { v.lastDate = ''; v.lastOdo = ''; }
       if (v.lastDate && v.lastDate > today()) return '마지막 교체일이 오늘보다 뒤예요';
+      if (S.intervals.some(x => x.item === v.item && (isNew || x.item !== iv.item))) return `'${v.item}' 항목이 이미 있어요`;
       const ops = [{ t: 'intervals' }];
       if (isNew) S.intervals.push(v);
       else {
