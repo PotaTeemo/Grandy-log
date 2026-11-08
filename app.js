@@ -462,7 +462,7 @@ const VIEWS = {
       <div class="card">
         <button class="btn danger" data-act="reset">모든 기록 지우기</button>
       </div>
-      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.7</p>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.8</p>
     `;
   },
 };
@@ -505,7 +505,7 @@ function fieldHtml(fd, values) {
   else if (fd.type === 'textarea') input = `<textarea id="${id}" name="${fd.name}" placeholder="${esc(fd.ph || '')}">${esc(v)}</textarea>`;
   else if (fd.type === 'num') input = `<input id="${id}" name="${fd.name}" type="text" inputmode="${fd.decimal ? 'decimal' : 'numeric'}" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}>`;
   else if (fd.type === 'list') input = `<input id="${id}" name="${fd.name}" list="${id}_dl" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}><datalist id="${id}_dl">${fd.options.map(o => `<option value="${esc(o)}">`).join('')}</datalist>`;
-  else input = `<input id="${id}" name="${fd.name}" type="${fd.type || 'text'}" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${fd.ac ? `autocomplete="${fd.ac}" autocapitalize="none"` : ''} ${req}>`;
+  else input = `<input id="${id}" name="${fd.name}" type="${fd.type || 'text'}" value="${esc(v)}" ${fd.past ? `max="${today()}"` : ''} placeholder="${esc(fd.ph || '')}" ${fd.ac ? `autocomplete="${fd.ac}" autocapitalize="none"` : ''} ${req}>`;
   return `<div class="field"><label for="${id}">${esc(fd.label)}</label>${input}${hint}</div>`;
 }
 function closeSheet() {
@@ -554,7 +554,7 @@ function fuelForm(rec) {
     title: isNew ? '주유 기록' : '주유 수정',
     values: rec ? { ...rec, unitPrice: prefillPrice } : { date: today(), full: true, odo: '' },
     fields: [
-      { name: 'date', label: '날짜', type: 'date', required: true },
+      { name: 'date', label: '날짜', type: 'date', past: true, required: true },
       { row: [
         { name: 'amount', label: '금액 (원)', type: 'num', required: true, ph: '50000' },
         { name: 'unitPrice', label: '리터당 가격 (원, 선택)', type: 'num', ph: '1650' },
@@ -582,7 +582,7 @@ function maintForm(rec, presetItem) {
     values: rec || { date: today(), item: presetItem || '', odo: currentOdo() || '' },
     fields: [
       { name: 'item', label: '정비 항목', type: 'list', options: items, required: true, ph: '목록에서 선택하거나 직접 입력', hint: '교체 주기에 있는 이름과 똑같이 입력하면 다음 교체 시기가 계산돼요' },
-      { name: 'date', label: '날짜', type: 'date', required: true },
+      { name: 'date', label: '날짜', type: 'date', past: true, required: true },
       { row: [
         { name: 'odo', label: '주행거리 (km)', type: 'num' },
         { name: 'cost', label: '비용 (원)', type: 'num', ph: '0' },
@@ -629,7 +629,7 @@ function taxForm(rec) {
         { name: 'year', label: '과세 연도', type: 'num', required: true },
         { name: 'period', label: '구분', type: 'select', options: TAX_PERIODS },
       ] },
-      { name: 'date', label: '납부일', type: 'date', required: true },
+      { name: 'date', label: '납부일', type: 'date', past: true, required: true },
       { name: 'amount', label: '납부 금액 (원)', type: 'num', required: true },
       { name: 'memo', label: '메모 (선택)', ph: '예: 연납 할인 적용' },
     ],
@@ -666,7 +666,7 @@ function intervalForm(idx) {
         { name: 'months', label: '교체 주기 (개월)', type: 'num', ph: '0 = 사용 안 함' },
       ] },
       { row: [
-        { name: 'lastDate', label: '마지막 교체일', type: 'date' },
+        { name: 'lastDate', label: '마지막 교체일', type: 'date', past: true },
         { name: 'lastOdo', label: '그때 주행거리 (km)', type: 'num', ph: '모르면 비워두기' },
       ] },
       { name: 'lastUnknown', label: '언제 교체했는지 모름', type: 'check', hint: '정비 내역에 이 항목 기록이 있으면, 더 최근 날짜가 자동으로 쓰여요' },
