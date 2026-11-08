@@ -366,6 +366,7 @@ const VIEWS = {
         return `<button class="row" data-act="edit-interval" data-idx="${i}">
           <div class="main"><div class="t">${esc(m.item)} <span class="muted" style="font-weight:400">${cycle}</span></div>
           <div class="s">${sub}</div>${next ? `<div class="s">${next}</div>` : ''}
+          ${m.product || m.spec ? `<div class="s">📝 ${esc([m.product, m.spec].filter(Boolean).join(' · '))}</div>` : ''}
           ${m.last ? `<div class="progress ${m.level === 'ok' ? '' : m.level}"><i style="width:${(m.ratio * 100).toFixed(0)}%"></i></div>` : ''}</div>
           <div class="r">${badge}</div>
         </button>`;
@@ -451,7 +452,7 @@ const VIEWS = {
       <div class="card">
         <button class="btn danger" data-act="reset">모든 기록 지우기</button>
       </div>
-      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.2</p>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.3</p>
     `;
   },
 };
@@ -646,6 +647,8 @@ function intervalForm(idx) {
         { name: 'lastOdo', label: '그때 주행거리 (km)', type: 'num', ph: '모르면 비워두기' },
       ] },
       { name: 'lastUnknown', label: '언제 교체했는지 모름', type: 'check', hint: '정비 내역에 이 항목 기록이 있으면, 더 최근 날짜가 자동으로 쓰여요' },
+      { name: 'product', label: '제품명 (선택)', ph: '예: 모빌1 5W-30' },
+      { name: 'spec', label: '스펙 (선택)', ph: '예: 5W-30, 6L / 245/45R18' },
     ],
     extraHtml: isNew ? '' : `<button class="btn secondary" type="button" data-sheet="quick-maint" data-item="${esc(iv.item)}">오늘 교체했어요 · 정비 기록 추가</button>`,
     onSave(v) {
