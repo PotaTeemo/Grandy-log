@@ -1,6 +1,6 @@
 // 오프라인에서도 앱이 열리도록 파일을 저장해 둡니다.
 // 앱을 수정한 뒤에는 VERSION 숫자를 올려 주세요.
-const VERSION = 'carlog-v7';
+const VERSION = 'carlog-v8';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'sync.js', 'firebase-config.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

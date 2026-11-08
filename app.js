@@ -462,7 +462,7 @@ const VIEWS = {
       <div class="card">
         <button class="btn danger" data-act="reset">모든 기록 지우기</button>
       </div>
-      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.6</p>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.7</p>
     `;
   },
 };
@@ -484,6 +484,15 @@ function openSheet({ title, fields, values = {}, onSave, onDelete, saveLabel = '
     </form>`;
   $('#backdrop').hidden = false;
   document.body.style.overflow = 'hidden';
+  sheetCtx.initial = JSON.stringify(readForm()); // 처음 값 (바뀌었는지 비교용)
+}
+function sheetDirty() {
+  return !!sheetCtx && !!$('#sheetForm') && JSON.stringify(readForm()) !== sheetCtx.initial;
+}
+// 취소·바깥 누르기로 닫을 때: 입력한 게 있으면 한 번 물어봄
+function requestClose() {
+  if (sheetDirty() && !confirm('입력하던 내용이 사라져요. 닫을까요?')) return;
+  closeSheet();
 }
 function fieldHtml(fd, values) {
   const v = values[fd.name] ?? fd.value ?? '';
@@ -783,10 +792,10 @@ $('#main').addEventListener('click', e => {
       return;
   }
 });
+// 입력 화면 바깥(어두운 배경)을 눌러도 닫히지 않음. '저장' 또는 '취소'로만 닫힘
 $('#backdrop').addEventListener('click', e => {
-  if (e.target === $('#backdrop')) return closeSheet();
   const b = e.target.closest('[data-sheet]'); if (!b) return;
-  if (b.dataset.sheet === 'close') closeSheet();
+  if (b.dataset.sheet === 'close') requestClose();
   else if (b.dataset.sheet === 'save') submitSheet();
   else if (b.dataset.sheet === 'delete') {
     if (confirm('이 기록을 삭제할까요?')) { commit(sheetCtx.onDelete()); closeSheet(); render(); toast('삭제했어요'); }
@@ -801,6 +810,8 @@ $('#backdrop').addEventListener('click', e => {
   }
 });
 $('#backdrop').addEventListener('submit', e => { e.preventDefault(); submitSheet(); });
+// 입력 중에 뒤로가기·새로고침·탭 닫기를 하면 브라우저가 한 번 확인해 줌
+window.addEventListener('beforeunload', e => { if (sheetDirty()) { e.preventDefault(); e.returnValue = ''; } });
 
 render();
 
