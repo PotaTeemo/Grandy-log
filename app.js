@@ -1,0 +1,655 @@
+'use strict';
+
+/* ================= 데이터 ================= */
+const KEY = 'carlog-v1';
+
+const DEFAULT_INTERVALS = [
+  { item: '엔진오일', km: 10000, months: 12 },
+  { item: '에어컨 필터', km: 10000, months: 12 },
+  { item: '에어 필터', km: 20000, months: 24 },
+  { item: '와이퍼', km: 0, months: 12 },
+  { item: '브레이크 패드', km: 40000, months: 0 },
+  { item: '냉각수', km: 40000, months: 48 },
+  { item: '배터리', km: 0, months: 48 },
+  { item: '타이어', km: 50000, months: 60 },
+  { item: '미션오일', km: 60000, months: 0 },
+];
+const EXTRA_ITEMS = ['정기점검', '타이어 위치교환', '세차/광택', '사고 수리', '기타'];
+const INS_TYPES = ['자동차보험(종합)', '자동차보험(책임)', '운전자보험', '긴급출동 특약', '기타'];
+const TAX_PERIODS = ['1기분 (6월)', '2기분 (12월)', '연납 (1월)', '연납 (3월)', '연납 (6월)', '연납 (9월)', '기타'];
+
+function defaults() {
+  return {
+    version: 1,
+    car: { name: '', plate: '', year: '', fuelType: '휘발유', odo: 0 },
+    fuel: [], maint: [], insurance: [], tax: [],
+    intervals: DEFAULT_INTERVALS.map(x => ({ ...x })),
+  };
+}
+function normalize(s) {
+  const d = defaults();
+  const out = { ...d, ...s, car: { ...d.car, ...(s.car || {}) } };
+  for (const k of ['fuel', 'maint', 'insurance', 'tax', 'intervals']) if (!Array.isArray(out[k])) out[k] = d[k];
+  return out;
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) return normalize(JSON.parse(raw));
+  } catch (e) { console.error(e); }
+  return defaults();
+}
+let S = load();
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(S)); }
+  catch (e) { alert('저장에 실패했어요: ' + e.message); }
+}
+// 홈 화면 앱의 데이터를 오래 보관하도록 요청
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+
+/* ================= 유틸 ================= */
+const $ = s => document.querySelector(s);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = v => { const n = parseFloat(String(v ?? '').replace(/,/g, '')); return isFinite(n) ? n : 0; };
+const won = n => Math.round(n).toLocaleString('ko-KR') + '원';
+const manwon = n => n >= 10000 ? (Math.round(n / 1000) / 10).toLocaleString('ko-KR') + '만' : Math.round(n).toLocaleString('ko-KR');
+const km = n => Math.round(n).toLocaleString('ko-KR') + 'km';
+function today() { const d = new Date(); return ymd(d); }
+function ymd(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function parseD(s) { const [y, m, d] = String(s).split('-').map(Number); return new Date(y, (m || 1) - 1, d || 1); }
+function addMonths(s, m) { const d = parseD(s); const day = d.getDate(); d.setDate(1); d.setMonth(d.getMonth() + m); const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(); d.setDate(Math.min(day, last)); return ymd(d); }
+function daysUntil(s) { return Math.round((parseD(s) - parseD(today())) / 86400000); }
+function fmtDate(s) { if (!s) return ''; const [y, m, d] = s.split('-'); return `${y}.${m}.${d}`; }
+const byDateDesc = (a, b) => (b.date || '').localeCompare(a.date || '') || (num(b.odo) - num(a.odo));
+
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 1800);
+}
+
+/* ================= 계산 ================= */
+function currentOdo() {
+  let m = num(S.car.odo);
+  for (const r of S.fuel) m = Math.max(m, num(r.odo));
+  for (const r of S.maint) m = Math.max(m, num(r.odo));
+  return m;
+}
+
+// 가득 주유 사이 구간으로 연비 계산
+function fuelStats() {
+  const list = S.fuel.filter(r => num(r.odo) > 0).slice().sort((a, b) => num(a.odo) - num(b.odo) || a.date.localeCompare(b.date));
+  const effById = {};
+  let lastFull = null, liters = 0, totKm = 0, totL = 0;
+  for (const r of list) {
+    if (lastFull) liters += num(r.liters);
+    if (r.full) {
+      if (lastFull && liters > 0 && num(r.odo) > num(lastFull.odo)) {
+        const d = num(r.odo) - num(lastFull.odo);
+        effById[r.id] = d / liters;
+        totKm += d; totL += liters;
+      }
+      lastFull = r; liters = 0;
+    }
+  }
+  const sortedEff = list.filter(r => effById[r.id]).map(r => effById[r.id]);
+  return {
+    effById,
+    avg: totL > 0 ? totKm / totL : null,
+    recent: sortedEff.length ? sortedEff[sortedEff.length - 1] : null,
+  };
+}
+
+function maintStatus() {
+  const odo = currentOdo();
+  return S.intervals.map(iv => {
+    const recs = S.maint.filter(r => r.item === iv.item).sort(byDateDesc);
+    const last = recs[0];
+    if (!last) return { ...iv, last: null, level: 'none' };
+    let kmLeft = null, daysLeft = null, ratio = 0, dueDate = null;
+    if (num(iv.km) > 0 && num(last.odo) > 0) {
+      kmLeft = num(last.odo) + num(iv.km) - odo;
+      ratio = Math.max(ratio, (odo - num(last.odo)) / num(iv.km));
+    }
+    if (num(iv.months) > 0) {
+      dueDate = addMonths(last.date, num(iv.months));
+      daysLeft = daysUntil(dueDate);
+      const total = Math.max(1, (parseD(dueDate) - parseD(last.date)) / 86400000);
+      ratio = Math.max(ratio, 1 - daysLeft / total);
+    }
+    let level = 'ok';
+    if ((kmLeft !== null && kmLeft < 0) || (daysLeft !== null && daysLeft < 0)) level = 'bad';
+    else if ((kmLeft !== null && kmLeft <= 1000) || (daysLeft !== null && daysLeft <= 30)) level = 'warn';
+    return { ...iv, last, kmLeft, daysLeft, dueDate, ratio: Math.min(1, Math.max(0, ratio)), level };
+  });
+}
+
+function currentInsurance() {
+  const t = today();
+  const active = S.insurance.filter(r => r.start <= t && t <= r.end);
+  return active;
+}
+
+// 월별 지출 (보험은 월 보험료를 보장기간 동안 매달 반영)
+function monthKey(s) { return s.slice(0, 7); }
+function spendByMonth(keys) {
+  const res = {};
+  for (const k of keys) res[k] = { fuel: 0, maint: 0, ins: 0, tax: 0 };
+  for (const r of S.fuel) { const k = monthKey(r.date || ''); if (res[k]) res[k].fuel += num(r.amount); }
+  for (const r of S.maint) { const k = monthKey(r.date || ''); if (res[k]) res[k].maint += num(r.cost); }
+  for (const r of S.tax) { const k = monthKey(r.date || ''); if (res[k]) res[k].tax += num(r.amount); }
+  for (const r of S.insurance) {
+    if (!r.start || !r.end) continue;
+    const s = monthKey(r.start), e = monthKey(r.end);
+    for (const k of keys) if (k >= s && k <= e) res[k].ins += num(r.monthly);
+  }
+  return res;
+}
+function lastMonths(n) {
+  const d = new Date(); d.setDate(1);
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) { const x = new Date(d.getFullYear(), d.getMonth() - i, 1); out.push(ymd(x).slice(0, 7)); }
+  return out;
+}
+function yearMonths(y) { return Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`); }
+const sumObj = o => o.fuel + o.maint + o.ins + o.tax;
+
+function taxStatus(year) {
+  const recs = S.tax.filter(r => String(r.year) === String(year));
+  const has = p => recs.some(r => r.period.startsWith(p));
+  const annual = recs.some(r => r.period.startsWith('연납'));
+  return { recs, first: annual || has('1기'), second: annual || has('2기'), annual, total: recs.reduce((a, r) => a + num(r.amount), 0) };
+}
+
+/* ================= 렌더 ================= */
+let tab = 'home';
+const TITLES = { home: '내 차 관리', fuel: '주유 기록', maint: '정비 기록', money: '보험 · 자동차세', settings: '설정' };
+
+function render() {
+  $('#title').textContent = TITLES[tab];
+  document.querySelectorAll('#tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  $('#main').innerHTML = VIEWS[tab]();
+}
+
+const VIEWS = {
+  home() {
+    const odo = currentOdo();
+    const fs = fuelStats();
+    const months = lastMonths(6);
+    const sp = spendByMonth(months);
+    const thisMonth = sumObj(sp[months[months.length - 1]]);
+    const y = new Date().getFullYear();
+    const ySp = spendByMonth(yearMonths(y));
+    const yTot = { fuel: 0, maint: 0, ins: 0, tax: 0 };
+    for (const k in ySp) for (const c in yTot) yTot[c] += ySp[k][c];
+    const yearSum = sumObj(yTot);
+
+    // 알림
+    const alerts = [];
+    if (!S.car.name) alerts.push({ lv: 'ok', t: '차량 정보를 먼저 등록해 주세요', s: '설정 탭에서 차 이름과 주행거리를 입력할 수 있어요', go: 'settings' });
+    for (const m of maintStatus()) {
+      if (m.level === 'bad' || m.level === 'warn') {
+        const parts = [];
+        if (m.kmLeft !== null) parts.push(m.kmLeft < 0 ? `${km(-m.kmLeft)} 초과` : `${km(m.kmLeft)} 남음`);
+        if (m.daysLeft !== null) parts.push(m.daysLeft < 0 ? `${-m.daysLeft}일 지남` : `${m.daysLeft}일 남음`);
+        alerts.push({ lv: m.level, t: `${m.item} 교체 ${m.level === 'bad' ? '시기가 지났어요' : '시기가 다가와요'}`, s: parts.join(' · '), go: 'maint' });
+      }
+    }
+    for (const r of S.insurance) {
+      const d = daysUntil(r.end);
+      if (d >= 0 && d <= 30 && !S.insurance.some(o => o !== r && o.type === r.type && o.start > r.start)) {
+        alerts.push({ lv: d <= 7 ? 'bad' : 'warn', t: `${r.type} 만기 D-${d}`, s: `${r.company || ''} · ${fmtDate(r.end)} 만기`, go: 'money' });
+      }
+    }
+    const now = new Date(); const ts = taxStatus(now.getFullYear()); const mo = now.getMonth() + 1;
+    if (mo === 6 && !ts.first) alerts.push({ lv: 'warn', t: '자동차세 1기분 납부 기간이에요', s: '6월 16일 ~ 6월 30일', go: 'money' });
+    if (mo === 12 && !ts.second) alerts.push({ lv: 'warn', t: '자동차세 2기분 납부 기간이에요', s: '12월 16일 ~ 12월 31일', go: 'money' });
+
+    const maxM = Math.max(1, ...months.map(k => sumObj(sp[k])));
+    const C = { fuel: 'var(--fuel)', maint: 'var(--maint)', ins: 'var(--ins)', tax: 'var(--tax)' };
+    const N = { fuel: '주유', maint: '정비', ins: '보험', tax: '자동차세' };
+
+    return `
+      <div class="card car-hero">
+        <div class="name">${esc(S.car.name || '내 차')}</div>
+        <div class="meta">${esc([S.car.plate, S.car.year && S.car.year + '년식', S.car.fuelType].filter(Boolean).join(' · ') || '설정에서 차량 정보를 입력하세요')}</div>
+        <div class="odo">${Math.round(odo).toLocaleString('ko-KR')} <small>km</small></div>
+      </div>
+
+      ${alerts.length ? `<div class="section-title">알림</div>` + alerts.map(a => `
+        <div class="alert ${a.lv}" data-go="${a.go}"><div>${a.lv === 'bad' ? '🚨' : a.lv === 'warn' ? '⚠️' : '👋'}</div>
+        <div><b>${esc(a.t)}</b><span class="muted">${esc(a.s)}</span></div></div>`).join('') : ''}
+
+      <div class="grid2">
+        <div class="card stat"><div class="label">이번 달 지출</div><div class="value">${manwon(thisMonth)}<small>원</small></div></div>
+        <div class="card stat"><div class="label">${y}년 누적 지출</div><div class="value">${manwon(yearSum)}<small>원</small></div></div>
+        <div class="card stat"><div class="label">평균 연비</div><div class="value">${fs.avg ? fs.avg.toFixed(1) : '-'}<small> km/L</small></div></div>
+        <div class="card stat"><div class="label">최근 연비</div><div class="value">${fs.recent ? fs.recent.toFixed(1) : '-'}<small> km/L</small></div></div>
+      </div>
+
+      <div class="card">
+        <h2>월별 지출 <span class="right">최근 6개월</span></h2>
+        <div class="chart">
+          ${months.map(k => {
+            const o = sp[k], tot = sumObj(o);
+            return `<div class="col">
+              <div class="amt">${tot ? manwon(tot) : ''}</div>
+              <div class="stack" style="height:${Math.max(2, tot / maxM * 100)}%">
+                ${['fuel', 'maint', 'ins', 'tax'].map(c => o[c] ? `<i style="height:${o[c] / (tot || 1) * 100}%;background:${C[c]}"></i>` : '').join('')}
+              </div>
+              <div class="lbl">${Number(k.slice(5))}월</div></div>`;
+          }).join('')}
+        </div>
+        <div class="legend">${Object.keys(N).map(c => `<span style="--c:${C[c]}">${N[c]}</span>`).join('')}</div>
+      </div>
+
+      <div class="card">
+        <h2>${y}년 항목별 지출</h2>
+        ${Object.keys(N).map(c => `
+          <div class="cat-row" style="--c:${C[c]}">
+            <span class="n">${N[c]}</span>
+            <span class="bar"><i style="width:${yearSum ? yTot[c] / yearSum * 100 : 0}%"></i></span>
+            <span class="v">${won(yTot[c])}</span>
+          </div>`).join('')}
+        <p class="muted" style="margin:8px 0 0">보험은 월 보험료를 보장 기간 동안 매달 나눠 계산해요.</p>
+      </div>
+    `;
+  },
+
+  fuel() {
+    const fs = fuelStats();
+    const list = S.fuel.slice().sort(byDateDesc);
+    const y = String(new Date().getFullYear());
+    const yr = S.fuel.filter(r => (r.date || '').startsWith(y));
+    const yAmt = yr.reduce((a, r) => a + num(r.amount), 0);
+    const yL = yr.reduce((a, r) => a + num(r.liters), 0);
+    return `
+      <div class="grid2">
+        <div class="card stat"><div class="label">평균 연비</div><div class="value">${fs.avg ? fs.avg.toFixed(1) : '-'}<small> km/L</small></div></div>
+        <div class="card stat"><div class="label">올해 주유비</div><div class="value">${manwon(yAmt)}<small>원 · ${yL.toFixed(0)}L</small></div></div>
+      </div>
+      <div class="section-title">주유 내역 <button class="add-btn" data-act="add-fuel">+ 주유 추가</button></div>
+      ${list.length ? `<div class="list">${list.map(r => {
+        const eff = fs.effById[r.id];
+        const unit = num(r.liters) > 0 ? num(r.amount) / num(r.liters) : 0;
+        return `<button class="row" data-act="edit-fuel" data-id="${r.id}">
+          <div class="main"><div class="t">${fmtDate(r.date)} ${r.full ? '' : '<span class="badge gray">부분</span>'}</div>
+          <div class="s">${km(num(r.odo))} · ${num(r.liters).toFixed(2)}L${unit ? ' · ' + Math.round(unit).toLocaleString() + '원/L' : ''}${r.station ? ' · ' + esc(r.station) : ''}</div></div>
+          <div class="r"><div class="t">${won(num(r.amount))}</div><div class="s">${eff ? eff.toFixed(1) + ' km/L' : ''}</div></div>
+        </button>`;
+      }).join('')}</div>` : `<div class="card empty">아직 주유 기록이 없어요.<br>가득 주유를 두 번 이상 기록하면 연비가 계산돼요.</div>`}
+      <p class="muted">연비는 '가득 주유'와 다음 '가득 주유' 사이에 넣은 기름 양으로 계산해요.</p>
+    `;
+  },
+
+  maint() {
+    const st = maintStatus();
+    const list = S.maint.slice().sort(byDateDesc);
+    const yAmt = S.maint.filter(r => (r.date || '').startsWith(String(new Date().getFullYear()))).reduce((a, r) => a + num(r.cost), 0);
+    return `
+      <div class="section-title">소모품 교체 주기 <span class="muted">올해 정비비 ${won(yAmt)}</span></div>
+      <div class="list">${st.map(m => {
+        let sub = '기록 없음';
+        let badge = '<span class="badge gray">기록 없음</span>';
+        if (m.last) {
+          const parts = [];
+          if (m.kmLeft !== null) parts.push(m.kmLeft < 0 ? `${km(-m.kmLeft)} 초과` : `${km(m.kmLeft)} 남음`);
+          if (m.dueDate) parts.push(m.daysLeft < 0 ? `${fmtDate(m.dueDate)} (지남)` : `${fmtDate(m.dueDate)}까지`);
+          sub = `마지막 ${fmtDate(m.last.date)} · ${parts.join(' · ')}`;
+          badge = m.level === 'bad' ? '<span class="badge bad">교체 필요</span>' : m.level === 'warn' ? '<span class="badge warn">곧 교체</span>' : '<span class="badge ok">양호</span>';
+        }
+        const cycle = [num(m.km) ? km(m.km) : '', num(m.months) ? m.months + '개월' : ''].filter(Boolean).join(' / ');
+        return `<button class="row" data-act="add-maint" data-item="${esc(m.item)}">
+          <div class="main"><div class="t">${esc(m.item)} <span class="muted" style="font-weight:400">${cycle}</span></div>
+          <div class="s">${sub}</div>
+          ${m.last ? `<div class="progress ${m.level === 'ok' ? '' : m.level}"><i style="width:${(m.ratio * 100).toFixed(0)}%"></i></div>` : ''}</div>
+          <div class="r">${badge}</div>
+        </button>`;
+      }).join('')}</div>
+      <p class="muted" style="margin-top:-4px">항목을 누르면 바로 교체 기록을 남길 수 있어요. 주기는 설정에서 바꿀 수 있어요.</p>
+
+      <div class="section-title">정비 내역 <button class="add-btn" data-act="add-maint">+ 정비 추가</button></div>
+      ${list.length ? `<div class="list">${list.map(r => `
+        <button class="row" data-act="edit-maint" data-id="${r.id}">
+          <div class="main"><div class="t">${esc(r.item)}</div>
+          <div class="s">${fmtDate(r.date)}${num(r.odo) ? ' · ' + km(num(r.odo)) : ''}${r.shop ? ' · ' + esc(r.shop) : ''}${r.memo ? ' · ' + esc(r.memo) : ''}</div></div>
+          <div class="r"><div class="t">${won(num(r.cost))}</div></div>
+        </button>`).join('')}</div>` : `<div class="card empty">아직 정비 기록이 없어요.</div>`}
+    `;
+  },
+
+  money() {
+    const active = currentInsurance();
+    const insList = S.insurance.slice().sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+    const monthlyTotal = active.reduce((a, r) => a + num(r.monthly), 0);
+    const y = new Date().getFullYear();
+    const ts = taxStatus(y);
+    const taxList = S.tax.slice().sort(byDateDesc);
+    const chip = (ok, label) => `<span class="badge ${ok ? 'ok' : 'gray'}">${label} ${ok ? '납부 ✓' : '미납'}</span>`;
+    return `
+      <div class="section-title">보험 <button class="add-btn" data-act="add-ins">+ 보험 추가</button></div>
+      <div class="card">
+        <h2>현재 가입 중 <span class="right">월 ${won(monthlyTotal)} · 연 ${won(monthlyTotal * 12)}</span></h2>
+        ${active.length ? active.map(r => {
+          const d = daysUntil(r.end);
+          return `<div class="kv"><span>${esc(r.type)}</span><span><b>${won(num(r.monthly))}</b>/월 · <span class="badge ${d <= 7 ? 'bad' : d <= 30 ? 'warn' : ''}">D-${d}</span></span></div>`;
+        }).join('') : '<div class="muted">현재 보장 기간 안에 있는 보험이 없어요.</div>'}
+      </div>
+      ${insList.length ? `<div class="list">${insList.map(r => {
+        const t = today(); const on = r.start <= t && t <= r.end;
+        return `<button class="row" data-act="edit-ins" data-id="${r.id}">
+          <div class="main"><div class="t">${esc(r.type)} ${on ? '<span class="badge ok">가입중</span>' : (r.end < t ? '<span class="badge gray">만료</span>' : '<span class="badge">예정</span>')}</div>
+          <div class="s">${esc(r.company || '')} · ${fmtDate(r.start)} ~ ${fmtDate(r.end)}</div></div>
+          <div class="r"><div class="t">${won(num(r.monthly))}</div><div class="s">월 보험료</div></div>
+        </button>`;
+      }).join('')}</div>` : ''}
+
+      <div class="section-title">자동차세 <button class="add-btn" data-act="add-tax">+ 납부 추가</button></div>
+      <div class="card">
+        <h2>${y}년 납부 현황 <span class="right">합계 ${won(ts.total)}</span></h2>
+        <div class="chips">${ts.annual ? '<span class="badge ok">연납 완료 ✓</span>' : chip(ts.first, '1기(6월)') + chip(ts.second, '2기(12월)')}</div>
+        <p class="muted" style="margin:10px 0 0">1월에 연납하면 할인돼요. 1기 6/16~6/30, 2기 12/16~12/31.</p>
+      </div>
+      ${taxList.length ? `<div class="list">${taxList.map(r => `
+        <button class="row" data-act="edit-tax" data-id="${r.id}">
+          <div class="main"><div class="t">${esc(r.year)}년 ${esc(r.period)}</div>
+          <div class="s">${fmtDate(r.date)} 납부${r.memo ? ' · ' + esc(r.memo) : ''}</div></div>
+          <div class="r"><div class="t">${won(num(r.amount))}</div></div>
+        </button>`).join('')}</div>` : `<div class="card empty">아직 자동차세 납부 기록이 없어요.</div>`}
+    `;
+  },
+
+  settings() {
+    return `
+      <div class="section-title">차량 정보</div>
+      <div class="list"><button class="row" data-act="edit-car">
+        <div class="main"><div class="t">${esc(S.car.name || '차량 정보 입력')}</div>
+        <div class="s">${esc([S.car.plate, S.car.year && S.car.year + '년식', S.car.fuelType].filter(Boolean).join(' · '))} · 현재 ${km(currentOdo())}</div></div>
+        <div class="r muted">수정 ›</div></button></div>
+
+      <div class="section-title">소모품 교체 주기 <button class="add-btn" data-act="add-interval">+ 항목 추가</button></div>
+      <div class="list">${S.intervals.map((iv, i) => `
+        <button class="row" data-act="edit-interval" data-idx="${i}">
+          <div class="main"><div class="t">${esc(iv.item)}</div></div>
+          <div class="r muted">${[num(iv.km) ? km(iv.km) : '', num(iv.months) ? iv.months + '개월' : ''].filter(Boolean).join(' / ') || '주기 없음'} ›</div>
+        </button>`).join('')}</div>
+
+      <div class="section-title">백업</div>
+      <div class="card">
+        <p class="muted" style="margin-top:0">기록은 이 아이폰 안에만 저장돼요. 휴대폰을 바꾸거나 앱을 지우기 전에 꼭 백업 파일을 저장해 두세요. (파일 앱 · iCloud Drive에 저장 가능)</p>
+        <button class="btn" data-act="export">백업 파일 저장</button>
+        <button class="btn secondary" data-act="import">백업 파일 불러오기</button>
+        <input type="file" id="importFile" accept="application/json,.json" hidden>
+      </div>
+      <div class="card">
+        <button class="btn danger" data-act="reset">모든 기록 지우기</button>
+      </div>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.0</p>
+    `;
+  },
+};
+
+/* ================= 입력 시트 ================= */
+let sheetCtx = null;
+function openSheet({ title, fields, values = {}, onSave, onDelete, saveLabel = '저장' }) {
+  sheetCtx = { fields, onSave, onDelete };
+  const f = fields.map(fd => {
+    if (fd.row) return `<div class="field-row">${fd.row.map(x => fieldHtml(x, values)).join('')}</div>`;
+    return fieldHtml(fd, values);
+  }).join('');
+  $('#sheet').innerHTML = `
+    <div class="sheet-head"><button data-sheet="close">취소</button><h3>${esc(title)}</h3><button data-sheet="save"><b>${saveLabel}</b></button></div>
+    <form id="sheetForm" autocomplete="off">${f}
+      <button class="btn" type="submit">${saveLabel}</button>
+      ${onDelete ? '<button class="btn danger" type="button" data-sheet="delete">삭제</button>' : ''}
+    </form>`;
+  $('#backdrop').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+function fieldHtml(fd, values) {
+  const v = values[fd.name] ?? fd.value ?? '';
+  const id = 'f_' + fd.name;
+  const req = fd.required ? 'required' : '';
+  const hint = fd.hint ? `<div class="hint">${esc(fd.hint)}</div>` : '';
+  if (fd.type === 'check') return `<div class="field check"><label><input type="checkbox" name="${fd.name}" ${v ? 'checked' : ''}> ${esc(fd.label)}</label>${hint}</div>`;
+  let input;
+  if (fd.type === 'select') input = `<select id="${id}" name="${fd.name}" ${req}>${fd.options.map(o => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+  else if (fd.type === 'textarea') input = `<textarea id="${id}" name="${fd.name}" placeholder="${esc(fd.ph || '')}">${esc(v)}</textarea>`;
+  else if (fd.type === 'num') input = `<input id="${id}" name="${fd.name}" type="text" inputmode="${fd.decimal ? 'decimal' : 'numeric'}" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}>`;
+  else if (fd.type === 'list') input = `<input id="${id}" name="${fd.name}" list="${id}_dl" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}><datalist id="${id}_dl">${fd.options.map(o => `<option value="${esc(o)}">`).join('')}</datalist>`;
+  else input = `<input id="${id}" name="${fd.name}" type="${fd.type || 'text'}" value="${esc(v)}" placeholder="${esc(fd.ph || '')}" ${req}>`;
+  return `<div class="field"><label for="${id}">${esc(fd.label)}</label>${input}${hint}</div>`;
+}
+function closeSheet() { $('#backdrop').hidden = true; $('#sheet').innerHTML = ''; sheetCtx = null; document.body.style.overflow = ''; }
+function readForm() {
+  const form = $('#sheetForm'); const out = {};
+  const all = sheetCtx.fields.flatMap(f => f.row || [f]);
+  for (const fd of all) {
+    const el = form.querySelector(`[name="${fd.name}"]`);
+    if (!el) continue;
+    if (fd.type === 'check') out[fd.name] = el.checked;
+    else if (fd.type === 'num') out[fd.name] = String(el.value).trim() === '' ? '' : num(el.value);
+    else out[fd.name] = el.value.trim();
+  }
+  return out;
+}
+function submitSheet() {
+  const form = $('#sheetForm');
+  if (!form.reportValidity()) return;
+  const v = readForm();
+  const err = sheetCtx.onSave(v);
+  if (err) { alert(err); return; }
+  save(); closeSheet(); render(); toast('저장했어요');
+}
+
+/* --- 각 기록 폼 --- */
+function fuelForm(rec) {
+  const isNew = !rec;
+  openSheet({
+    title: isNew ? '주유 기록' : '주유 수정',
+    values: rec || { date: today(), full: true, odo: '' },
+    fields: [
+      { name: 'date', label: '날짜', type: 'date', required: true },
+      { name: 'odo', label: '주행거리 (km)', type: 'num', required: true, ph: `현재 ${Math.round(currentOdo()).toLocaleString()}`, hint: '계기판의 누적 주행거리(ODO)를 입력하세요' },
+      { row: [
+        { name: 'amount', label: '금액 (원)', type: 'num', required: true, ph: '50000' },
+        { name: 'liters', label: '주유량 (L)', type: 'num', decimal: true, required: true, ph: '30.5' },
+      ] },
+      { name: 'full', label: '가득 주유 (연비 계산에 사용)', type: 'check' },
+      { name: 'station', label: '주유소 (선택)', ph: 'OO주유소' },
+      { name: 'memo', label: '메모 (선택)', type: 'textarea' },
+    ],
+    onSave(v) {
+      if (v.odo <= 0) return '주행거리를 입력해 주세요';
+      if (v.liters <= 0) return '주유량을 입력해 주세요';
+      if (isNew) S.fuel.push({ id: uid(), ...v }); else Object.assign(rec, v);
+    },
+    onDelete: isNew ? null : () => { S.fuel = S.fuel.filter(r => r !== rec); },
+  });
+}
+function maintForm(rec, presetItem) {
+  const isNew = !rec;
+  const items = [...S.intervals.map(i => i.item), ...EXTRA_ITEMS];
+  openSheet({
+    title: isNew ? '정비 기록' : '정비 수정',
+    values: rec || { date: today(), item: presetItem || '', odo: currentOdo() || '' },
+    fields: [
+      { name: 'item', label: '정비 항목', type: 'list', options: items, required: true, ph: '목록에서 선택하거나 직접 입력', hint: '교체 주기에 있는 이름과 똑같이 입력하면 다음 교체 시기가 계산돼요' },
+      { name: 'date', label: '날짜', type: 'date', required: true },
+      { row: [
+        { name: 'odo', label: '주행거리 (km)', type: 'num' },
+        { name: 'cost', label: '비용 (원)', type: 'num', ph: '0' },
+      ] },
+      { name: 'shop', label: '정비소 (선택)' },
+      { name: 'memo', label: '메모 (선택)', type: 'textarea', ph: '부품명, 다음 점검 내용 등' },
+    ],
+    onSave(v) {
+      if (isNew) S.maint.push({ id: uid(), ...v }); else Object.assign(rec, v);
+    },
+    onDelete: isNew ? null : () => { S.maint = S.maint.filter(r => r !== rec); },
+  });
+}
+function insForm(rec) {
+  const isNew = !rec;
+  const start = today();
+  openSheet({
+    title: isNew ? '보험 추가' : '보험 수정',
+    values: rec || { type: INS_TYPES[0], start, end: addMonths(start, 12) },
+    fields: [
+      { name: 'type', label: '보험 종류', type: 'select', options: INS_TYPES },
+      { name: 'company', label: '보험사', ph: '예: OO화재' },
+      { name: 'monthly', label: '월 보험료 (원)', type: 'num', required: true, hint: '연납이라면 연 보험료 ÷ 12 를 입력하세요' },
+      { row: [
+        { name: 'start', label: '보장 시작일', type: 'date', required: true },
+        { name: 'end', label: '만기일', type: 'date', required: true },
+      ] },
+      { name: 'memo', label: '메모 (선택)', type: 'textarea', ph: '특약, 증권번호, 긴급출동 번호 등' },
+    ],
+    onSave(v) {
+      if (v.end < v.start) return '만기일이 시작일보다 빨라요';
+      if (isNew) S.insurance.push({ id: uid(), ...v }); else Object.assign(rec, v);
+    },
+    onDelete: isNew ? null : () => { S.insurance = S.insurance.filter(r => r !== rec); },
+  });
+}
+function taxForm(rec) {
+  const isNew = !rec;
+  const now = new Date();
+  const defPeriod = now.getMonth() + 1 <= 3 ? TAX_PERIODS[2] : now.getMonth() + 1 <= 6 ? TAX_PERIODS[0] : TAX_PERIODS[1];
+  openSheet({
+    title: isNew ? '자동차세 납부' : '자동차세 수정',
+    values: rec || { year: now.getFullYear(), period: defPeriod, date: today() },
+    fields: [
+      { row: [
+        { name: 'year', label: '과세 연도', type: 'num', required: true },
+        { name: 'period', label: '구분', type: 'select', options: TAX_PERIODS },
+      ] },
+      { name: 'date', label: '납부일', type: 'date', required: true },
+      { name: 'amount', label: '납부 금액 (원)', type: 'num', required: true },
+      { name: 'memo', label: '메모 (선택)', ph: '예: 연납 할인 적용' },
+    ],
+    onSave(v) {
+      if (isNew) S.tax.push({ id: uid(), ...v }); else Object.assign(rec, v);
+    },
+    onDelete: isNew ? null : () => { S.tax = S.tax.filter(r => r !== rec); },
+  });
+}
+function carForm() {
+  openSheet({
+    title: '차량 정보',
+    values: S.car,
+    fields: [
+      { name: 'name', label: '차 이름', required: true, ph: '예: 아반떼 CN7' },
+      { row: [
+        { name: 'plate', label: '차량 번호', ph: '12가 3456' },
+        { name: 'year', label: '연식', type: 'num', ph: '2022' },
+      ] },
+      { name: 'fuelType', label: '연료', type: 'select', options: ['휘발유', '경유', 'LPG', '하이브리드', '전기'] },
+      { name: 'odo', label: '현재 주행거리 (km)', type: 'num', hint: '주유·정비 기록 중 가장 큰 주행거리가 자동으로 반영돼요' },
+    ],
+    onSave(v) { Object.assign(S.car, v); },
+  });
+}
+function intervalForm(idx) {
+  const isNew = idx == null;
+  const iv = isNew ? null : S.intervals[idx];
+  openSheet({
+    title: isNew ? '교체 항목 추가' : '교체 주기',
+    values: iv || { km: '', months: '' },
+    fields: [
+      { name: 'item', label: '항목 이름', required: true },
+      { row: [
+        { name: 'km', label: '주기 (km)', type: 'num', ph: '0 = 사용 안 함' },
+        { name: 'months', label: '주기 (개월)', type: 'num', ph: '0 = 사용 안 함' },
+      ] },
+    ],
+    onSave(v) {
+      v.km = num(v.km); v.months = num(v.months);
+      if (isNew) S.intervals.push(v);
+      else {
+        // 이름을 바꾸면 기존 정비 기록의 항목 이름도 같이 변경
+        if (iv.item !== v.item) S.maint.forEach(r => { if (r.item === iv.item) r.item = v.item; });
+        Object.assign(iv, v);
+      }
+    },
+    onDelete: isNew ? null : () => { S.intervals.splice(idx, 1); },
+  });
+}
+
+/* ================= 백업 ================= */
+async function exportData() {
+  const name = `차량관리_백업_${today()}.json`;
+  const blob = new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' });
+  const file = new File([blob], name, { type: 'application/json' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      return;
+    }
+  } catch (e) { if (e.name === 'AbortError') return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+function importData(file) {
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const d = JSON.parse(r.result);
+      if (!d || typeof d !== 'object' || !('car' in d)) throw new Error('형식 오류');
+      if (!confirm('지금 기록을 백업 파일 내용으로 바꿀까요? 현재 기록은 사라져요.')) return;
+      S = normalize(d); save(); render(); toast('불러왔어요');
+    } catch (e) { alert('백업 파일을 읽을 수 없어요.'); }
+  };
+  r.readAsText(file);
+}
+
+/* ================= 이벤트 ================= */
+$('#tabbar').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]'); if (!b) return;
+  tab = b.dataset.tab; render(); window.scrollTo(0, 0);
+});
+$('#main').addEventListener('click', e => {
+  const go = e.target.closest('[data-go]');
+  if (go) { tab = go.dataset.go; render(); window.scrollTo(0, 0); return; }
+  const el = e.target.closest('[data-act]'); if (!el) return;
+  const id = el.dataset.id;
+  const find = (arr) => arr.find(r => r.id === id);
+  switch (el.dataset.act) {
+    case 'add-fuel': return fuelForm();
+    case 'edit-fuel': return fuelForm(find(S.fuel));
+    case 'add-maint': return maintForm(null, el.dataset.item);
+    case 'edit-maint': return maintForm(find(S.maint));
+    case 'add-ins': return insForm();
+    case 'edit-ins': return insForm(find(S.insurance));
+    case 'add-tax': return taxForm();
+    case 'edit-tax': return taxForm(find(S.tax));
+    case 'edit-car': return carForm();
+    case 'add-interval': return intervalForm();
+    case 'edit-interval': return intervalForm(Number(el.dataset.idx));
+    case 'export': return exportData();
+    case 'import': { const f = $('#importFile'); f.value = ''; f.onchange = () => f.files[0] && importData(f.files[0]); f.click(); return; }
+    case 'reset':
+      if (confirm('정말 모든 기록을 지울까요? 되돌릴 수 없어요.') && confirm('한 번 더 확인할게요. 백업은 해두셨나요? 모두 지웁니다.')) {
+        S = defaults(); save(); render(); toast('모두 지웠어요');
+      }
+      return;
+  }
+});
+$('#backdrop').addEventListener('click', e => {
+  if (e.target === $('#backdrop')) return closeSheet();
+  const b = e.target.closest('[data-sheet]'); if (!b) return;
+  if (b.dataset.sheet === 'close') closeSheet();
+  else if (b.dataset.sheet === 'save') submitSheet();
+  else if (b.dataset.sheet === 'delete') {
+    if (confirm('이 기록을 삭제할까요?')) { sheetCtx.onDelete(); save(); closeSheet(); render(); toast('삭제했어요'); }
+  }
+});
+$('#backdrop').addEventListener('submit', e => { e.preventDefault(); submitSheet(); });
+
+render();
+
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}

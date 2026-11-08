@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>내 차 관리</title>
+  <meta name="theme-color" content="#2563eb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="내 차 관리">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="title">내 차 관리</h1>
+  </header>
+
+  <main id="main"></main>
+
+  <nav class="tabbar" id="tabbar">
+    <button data-tab="home" class="active"><span class="ti">🏠</span><span>홈</span></button>
+    <button data-tab="fuel"><span class="ti">⛽</span><span>주유</span></button>
+    <button data-tab="maint"><span class="ti">🔧</span><span>정비</span></button>
+    <button data-tab="money"><span class="ti">📄</span><span>보험·세금</span></button>
+    <button data-tab="settings"><span class="ti">⚙️</span><span>설정</span></button>
+  </nav>
+
+  <div class="sheet-backdrop" id="backdrop" hidden>
+    <div class="sheet" id="sheet" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
