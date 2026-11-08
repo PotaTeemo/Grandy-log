@@ -146,12 +146,21 @@ function fuelStats() {
   };
 }
 
+// 마지막 교체: 정비 기록과 직접 입력한 '마지막 교체일' 중 더 최근 것
+function lastReplacement(iv) {
+  const recs = S.maint.filter(r => r.item === iv.item).sort(byDateDesc);
+  let last = recs[0] ? { date: recs[0].date, odo: num(recs[0].odo), src: 'record' } : null;
+  if (!iv.lastUnknown && iv.lastDate && (!last || iv.lastDate > last.date)) {
+    last = { date: iv.lastDate, odo: num(iv.lastOdo), src: 'manual' };
+  }
+  return last;
+}
+
 function maintStatus() {
   const odo = currentOdo();
   return S.intervals.map(iv => {
-    const recs = S.maint.filter(r => r.item === iv.item).sort(byDateDesc);
-    const last = recs[0];
-    if (!last) return { ...iv, last: null, level: 'none' };
+    const last = lastReplacement(iv);
+    if (!last) return { ...iv, last: null, level: iv.lastUnknown ? 'unknown' : 'none' };
     let kmLeft = null, daysLeft = null, ratio = 0, dueDate = null;
     if (num(iv.km) > 0 && num(last.odo) > 0) {
       kmLeft = num(last.odo) + num(iv.km) - odo;
@@ -233,6 +242,8 @@ const VIEWS = {
     // 알림
     const alerts = [];
     if (!S.car.name) alerts.push({ lv: 'ok', t: '차량 정보를 먼저 등록해 주세요', s: '설정 탭에서 차 이름과 주행거리를 입력할 수 있어요', go: 'settings' });
+    const unknownN = maintStatus().filter(m => m.level === 'unknown').length;
+    if (unknownN) alerts.push({ lv: 'ok', t: `교체 시기를 모르는 항목 ${unknownN}개`, s: '다음 정비 때 확인해서 기록해 두세요', go: 'maint' });
     for (const m of maintStatus()) {
       if (m.level === 'bad' || m.level === 'warn') {
         const parts = [];
@@ -334,25 +345,32 @@ const VIEWS = {
     const yAmt = S.maint.filter(r => (r.date || '').startsWith(String(new Date().getFullYear()))).reduce((a, r) => a + num(r.cost), 0);
     return `
       <div class="section-title">소모품 교체 주기 <span class="muted">올해 정비비 ${won(yAmt)}</span></div>
-      <div class="list">${st.map(m => {
-        let sub = '기록 없음';
-        let badge = '<span class="badge gray">기록 없음</span>';
+      <div class="list">${st.map((m, i) => {
+        let sub = '마지막 교체: 미입력 · 눌러서 입력해 주세요';
+        let next = '';
+        let badge = '<span class="badge gray">미입력</span>';
+        if (m.level === 'unknown') {
+          sub = '마지막 교체: 모름';
+          next = '다음 정비 때 상태를 확인해 보세요';
+          badge = '<span class="badge warn">모름</span>';
+        }
         if (m.last) {
           const parts = [];
           if (m.kmLeft !== null) parts.push(m.kmLeft < 0 ? `${km(-m.kmLeft)} 초과` : `${km(m.kmLeft)} 남음`);
           if (m.dueDate) parts.push(m.daysLeft < 0 ? `${fmtDate(m.dueDate)} (지남)` : `${fmtDate(m.dueDate)}까지`);
-          sub = `마지막 ${fmtDate(m.last.date)} · ${parts.join(' · ')}`;
+          sub = `마지막 교체: ${fmtDate(m.last.date)}${m.last.odo ? ' · ' + km(m.last.odo) : ''}${m.last.src === 'manual' ? ' (직접 입력)' : ''}`;
+          next = parts.length ? '다음 교체: ' + parts.join(' · ') : '';
           badge = m.level === 'bad' ? '<span class="badge bad">교체 필요</span>' : m.level === 'warn' ? '<span class="badge warn">곧 교체</span>' : '<span class="badge ok">양호</span>';
         }
         const cycle = [num(m.km) ? km(m.km) : '', num(m.months) ? m.months + '개월' : ''].filter(Boolean).join(' / ');
-        return `<button class="row" data-act="add-maint" data-item="${esc(m.item)}">
+        return `<button class="row" data-act="edit-interval" data-idx="${i}">
           <div class="main"><div class="t">${esc(m.item)} <span class="muted" style="font-weight:400">${cycle}</span></div>
-          <div class="s">${sub}</div>
+          <div class="s">${sub}</div>${next ? `<div class="s">${next}</div>` : ''}
           ${m.last ? `<div class="progress ${m.level === 'ok' ? '' : m.level}"><i style="width:${(m.ratio * 100).toFixed(0)}%"></i></div>` : ''}</div>
           <div class="r">${badge}</div>
         </button>`;
       }).join('')}</div>
-      <p class="muted" style="margin-top:-4px">항목을 누르면 바로 교체 기록을 남길 수 있어요. 주기는 설정에서 바꿀 수 있어요.</p>
+      <p class="muted" style="margin-top:-4px">항목을 누르면 교체 주기와 마지막 교체 시기를 입력하거나, 교체 기록을 바로 남길 수 있어요.</p>
 
       <div class="section-title">정비 내역 <button class="add-btn" data-act="add-maint">+ 정비 추가</button></div>
       ${list.length ? `<div class="list">${list.map(r => `
@@ -433,7 +451,7 @@ const VIEWS = {
       <div class="card">
         <button class="btn danger" data-act="reset">모든 기록 지우기</button>
       </div>
-      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.1</p>
+      <p class="muted" style="text-align:center">기록 ${S.fuel.length + S.maint.length + S.insurance.length + S.tax.length}건 · v1.2</p>
     `;
   },
 };
@@ -450,8 +468,8 @@ function openSheet({ title, fields, values = {}, onSave, onDelete, saveLabel = '
     <div class="sheet-head"><button data-sheet="close">취소</button><h3>${esc(title)}</h3><button data-sheet="save"><b>${saveLabel}</b></button></div>
     <form id="sheetForm" autocomplete="off">${f}
       <button class="btn" type="submit">${saveLabel}</button>
-      ${onDelete ? '<button class="btn danger" type="button" data-sheet="delete">삭제</button>' : ''}
       ${extraHtml}
+      ${onDelete ? '<button class="btn danger" type="button" data-sheet="delete">삭제</button>' : ''}
     </form>`;
   $('#backdrop').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -615,17 +633,25 @@ function intervalForm(idx) {
   const isNew = idx == null;
   const iv = isNew ? null : S.intervals[idx];
   openSheet({
-    title: isNew ? '교체 항목 추가' : '교체 주기',
+    title: isNew ? '교체 항목 추가' : iv.item,
     values: iv || { km: '', months: '' },
     fields: [
       { name: 'item', label: '항목 이름', required: true },
       { row: [
-        { name: 'km', label: '주기 (km)', type: 'num', ph: '0 = 사용 안 함' },
-        { name: 'months', label: '주기 (개월)', type: 'num', ph: '0 = 사용 안 함' },
+        { name: 'km', label: '교체 주기 (km)', type: 'num', ph: '0 = 사용 안 함' },
+        { name: 'months', label: '교체 주기 (개월)', type: 'num', ph: '0 = 사용 안 함' },
       ] },
+      { row: [
+        { name: 'lastDate', label: '마지막 교체일', type: 'date' },
+        { name: 'lastOdo', label: '그때 주행거리 (km)', type: 'num', ph: '모르면 비워두기' },
+      ] },
+      { name: 'lastUnknown', label: '언제 교체했는지 모름', type: 'check', hint: '정비 내역에 이 항목 기록이 있으면, 더 최근 날짜가 자동으로 쓰여요' },
     ],
+    extraHtml: isNew ? '' : `<button class="btn secondary" type="button" data-sheet="quick-maint" data-item="${esc(iv.item)}">오늘 교체했어요 · 정비 기록 추가</button>`,
     onSave(v) {
       v.km = num(v.km); v.months = num(v.months);
+      if (v.lastUnknown) { v.lastDate = ''; v.lastOdo = ''; }
+      if (v.lastDate && v.lastDate > today()) return '마지막 교체일이 오늘보다 뒤예요';
       const ops = [{ t: 'intervals' }];
       if (isNew) S.intervals.push(v);
       else {
@@ -746,6 +772,9 @@ $('#backdrop').addEventListener('click', e => {
   else if (b.dataset.sheet === 'save') submitSheet();
   else if (b.dataset.sheet === 'delete') {
     if (confirm('이 기록을 삭제할까요?')) { commit(sheetCtx.onDelete()); closeSheet(); render(); toast('삭제했어요'); }
+  }
+  else if (b.dataset.sheet === 'quick-maint') {
+    const item = b.dataset.item; closeSheet(); maintForm(null, item);
   }
   else if (b.dataset.sheet === 'reset-pw') {
     const email = ($('#f_email') || {}).value || '';
